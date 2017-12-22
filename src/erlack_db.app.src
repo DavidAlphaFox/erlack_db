@@ -1,0 +1,13 @@
+{application, erlack_db,
+ [{description, "Erlack Database Wrapper"},
+  {vsn, "0.0.1"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {included_applications, []},
+  {env,[]},
+  {modules, []},
+  {licenses, ["Apache 2.0"]}
+ ]}.
