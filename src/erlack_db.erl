@@ -1,13 +1,17 @@
 -module(erlack_db).
 
--export([query/3]).
+-export([query/2]).
 
 -export([parse_transform/2, format_error/1]).
 
 
-query(Conn, SQL, Params) ->
-    {ok, _, Rows} = epgsql:equery(Conn, SQL, Params),
-    Rows.
+query(Conn, {select, SQL, Params, Fun}) ->
+    case epgsql:equery(Conn, SQL, Params) of
+        {ok, _, Rows}  ->
+            {ok, Fun(Rows)};
+        Other ->
+            Other
+    end.
 
 
 parse_transform(Forms, Options) ->
@@ -82,36 +86,43 @@ form(Form) ->
 
 
 transform(
-  {tree, application, {attr, Line, _, _},
+  {tree, application, {attr, _Line, _, _},
    {application,
-    {tree, module_qualifier, {attr, LineR, _, _},
+    {tree, module_qualifier, {attr, _LineR, _, _},
      {module_qualifier,
-      {wrapper, atom, _, {atom, LineM, ?MODULE}},
-      {wrapper, atom, _, {atom, LineF, F}}
+      {wrapper, atom, _, {atom, _LineM, ?MODULE}},
+      {wrapper, atom, _, {atom, _LineF, compile}}
      }
     },
-    Args
+    [Arg]
    }
   } = Tree, Warnings) ->
-    case {F, Args} of
-        {select, [C, LC]} ->
-            {LC1, Meta} = visit_query(LC, new_meta()),
-            Call = {call, Line, {remote, LineR, {atom, LineM, ?MODULE}, {atom, LineF, query}}},
-            build_query(Line, Call, C, [], LC1, Meta, Warnings);
-        {select, [C, M, LC]} ->
-            {tree, map_expr,
-             {attr, _, Vars, _},
-             _
-            } = M,
-            Env = proplists:get_value(env, Vars),
+    case Arg of
+        {tree, application, _,
+         {application,
+          {wrapper, atom, _, {atom, Line, select}},
+          Args
+         }
+        } ->
+            case Args of
+                [LC] ->
+                    {LC1, Meta} = visit_query(LC, new_meta()),
+                    build_query(Line, [], LC1, Meta, Warnings);
+                [{tree, map_expr,
+                  {attr, _, Vars, _},
+                  _} = M,
+                 LC] ->
+                    Env = proplists:get_value(env, Vars),
 
-            {CTEs, _, Meta} =
-                visit_ctes(
-                  erl_syntax:revert(M),
-                  (new_meta())#{env => Env}),
-            {LC1, Meta1} = visit_query(LC, Meta),
-            Call = {call, Line, {remote, LineR, {atom, LineM, ?MODULE}, {atom, LineF, query}}},
-            build_query(Line, Call, C, CTEs, LC1, Meta1, Warnings);
+                    {CTEs, _, Meta} =
+                        visit_ctes(
+                          erl_syntax:revert(M),
+                          (new_meta())#{env => Env}),
+                    {LC1, Meta1} = visit_query(LC, Meta),
+                    build_query(Line, CTEs, LC1, Meta1, Warnings);
+                _ ->
+                    {Tree, Warnings}
+            end;
         _ ->
             {Tree, Warnings}
     end;
@@ -634,7 +645,7 @@ is_aggregate({A, _}, #{stack := [#{tables := Tables}|_]}) ->
     end.
 
 
-build_query(Line, Call, C, CTEs, LC = {lc, _, _, [{generate,_,_}=G]}, #{stack := [Query], params := Params, values := Values, warnings := Warnings1}, Warnings) ->
+build_query(Line, CTEs, LC = {lc, _, _, [{generate,_,_}=G]}, #{stack := [Query], params := Params, values := Values, warnings := Warnings1}, Warnings) ->
     ParamList = maps:keys(Params),
     ParamIndex = make_index_map(ParamList),
     Params1 =
@@ -657,19 +668,25 @@ build_query(Line, Call, C, CTEs, LC = {lc, _, _, [{generate,_,_}=G]}, #{stack :=
 
     SQL = format_query(CTEs, Query, ParamIndex),
 
-    {setelement(
-       4, LC,
-       [erlang:append_element(
-          G,
-          erlang:append_element(
-            Call,
-            [erl_syntax:revert(C),
-             {string, Line, lists:flatten(SQL)},
-             erl_syntax:revert(erl_syntax:list(Params1))])
-         )
-       ]),
+    {{tuple, Line,
+      [{atom, Line, select},
+       {string, Line, lists:flatten(SQL)},
+       erl_syntax:revert(erl_syntax:list(Params1)),
+       {'fun', Line,
+        {clauses,
+         [{clause, Line,
+           [{var, Line, '$'}],
+           [],
+           [setelement(
+             4, LC,
+             [erlang:append_element(G, {var, Line, '$'})]
+             )]
+          }
+         ]
+        }
+       }
+      ]},
      Warnings2}.
-
 
 check_query(CTEs, Query, Used) ->
     lists:foldl(
@@ -742,9 +759,9 @@ check_expression(_, Used) ->
 
 
 format_query(CTEs, Query, ParamIndex) ->
-    [ [io_lib:format("WITH RECURSIVE ~w(", [Key]),
+    [ [io_lib:format("WITH RECURSIVE \"~s\"(", [format_id(Key)]),
        string:join(
-         [io_lib:format("~w", [F]) || F <- Fields],
+         [io_lib:format("\"~s\"", [format_id(F)]) || F <- Fields],
          ", "),
        ") AS (",
        string:join([["(", format_query(Q, ParamIndex), ")"] || Q <- Queries], " UNION ALL "),
@@ -889,7 +906,7 @@ format_query(Query = #{line := Line, tables := Tables, outputs := Outputs, where
     end.
 
 format_table(T, _) when is_atom(T) ->
-    io_lib:format("~w", [T]);
+    io_lib:format("\"~s\"", [format_id(T)]);
 format_table({subquery, CTEs, Query}, ParamIndex) ->
     io_lib:format("LATERAL (~s)", [format_query(CTEs, Query, ParamIndex)]).
 
@@ -903,7 +920,7 @@ format_expression({expr, F, Args}, ParamIndex) ->
         || A <- Args
       ]);
 format_expression({column, T, C}, _) ->
-    io_lib:format("T~b.~w", [T, C]);
+    io_lib:format("T~b.\"~s\"", [T, format_id(C)]);
 format_expression({integer, I} , _) ->
     io_lib:format("~b", [I]);
 format_expression({var, _} = V, ParamIndex) ->
@@ -912,3 +929,11 @@ format_expression({value, _} = V, ParamIndex) ->
     io_lib:format("$~b", [maps:get(V, ParamIndex)]).
 
 
+format_id(Atom) when is_atom(Atom) ->
+    format_id(atom_to_list(Atom));
+format_id([]) ->
+    [];
+format_id([$"|T]) ->
+    [$", $"|format_id(T)];
+format_id([H|T]) ->
+    [H|format_id(T)].
