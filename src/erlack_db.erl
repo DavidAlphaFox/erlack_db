@@ -37,7 +37,7 @@ format_error(not_lc) ->
     "query expression is not a list comprehension.";
 format_error(illegal_output_expression) ->
     "illegal output expression.";
-format_error({unused, V}) ->
+format_error({unused_var, V}) ->
     io_lib:format("variable ~w is unused.", [V]);
 format_error({output_conflict, V}) ->
     io_lib:format("output column named '~w' already defined.", [V]);
@@ -63,8 +63,6 @@ format_error({once, X}) ->
     io_lib:format("~w is allowed only once.", [X]);
 format_error({unbound, V}) ->
     io_lib:format("variable ~w is unbound.", [V]);
-format_error(no_table) ->
-    "no table used in query expression.";
 format_error(first_table_join) ->
     "first table must not be a join.";
 format_error(unused_param) ->
@@ -108,7 +106,7 @@ transform(
                 [LC] ->
                     {LC1, Meta} = visit_query(LC, new_meta()),
                     build_query(Line, [], LC1, Meta, Warnings);
-                [{tree, map_expr,
+                [{_, _,
                   {attr, _, Vars, _},
                   _} = M,
                  LC] ->
@@ -153,8 +151,8 @@ visit_ctes({map, _, Fields}, Meta) ->
           {ordsets:new(), ordsets:new()},
           Fields1),
     {Fields2, A, Meta1};
-visit_ctes({_, _, {attr, Line, _, _}, _}, _) ->
-    throw({error, Line, illegal_cte}).
+visit_ctes(E, _) ->
+    throw({error, element(2,E), illegal_cte}).
 
 
 visit_cte({map_field_assoc, Line, {atom, _, Key}, E}, Meta) ->
@@ -262,7 +260,7 @@ visit_output(E, _) ->
 visit_output_fields([], Outputs, Meta = #{warnings := Warnings, stack := [H = #{used := Used, vars := Vars, lines := Lines}|T]}) ->
     Unused = ordsets:to_list(ordsets:subtract(ordsets:from_list(maps:keys(Vars)), Used)),
     Meta#{stack := [H#{outputs => Outputs}|T],
-          warnings := Warnings ++ [{maps:get(V, Lines), {unused, V}} || V <- Unused ]};
+          warnings := Warnings ++ [{maps:get(V, Lines), {unused_var, V}} || V <- Unused ]};
 visit_output_fields([{map_field_assoc, _, {atom, Line, Key}, E}|T], Outputs, Meta) ->
     case maps:is_key(Key, Outputs) of
         true ->
@@ -478,6 +476,8 @@ visit_expression({var, _, V}=Var, _, Meta) ->
     {E, A, add_aggregates(A, Meta1)};
 visit_expression({integer, _, I}, _, Meta) ->
     {{integer, I}, {ordsets:new(), ordsets:new()}, Meta};
+visit_expression({atom, _, true}, _, Meta) ->
+    {true, {ordsets:new(), ordsets:new()}, Meta};
 visit_expression(Expr, _, _Meta) ->
     throw({error, element(2, Expr), illegal_expression}).
 
@@ -771,139 +771,142 @@ format_query(CTEs, Query, ParamIndex) ->
 
 
 format_query(Query = #{line := Line, tables := Tables, outputs := Outputs, wheres := Wheres, havings := Havings}, ParamIndex) ->
-    case tuple_to_list(Tables) of
-        [] ->
-            throw({error, Line, no_table});
-        [{NF, {from, First}}|Tables1] ->
-            [ "SELECT ",
-              case Query of
-                  #{distinct := []} ->
-                      "DISTINCT ";
-                  #{distinct := Distinct} ->
-                      ["DISTINCT ON (",
-                       string:join(
-                         [ format_expression(E, ParamIndex)
-                           || E <- Distinct], ", "),
-                       ") "
-                      ];
-                  #{} ->
-                      []
-              end,
+    [ "SELECT ",
+      case Query of
+          #{distinct := []} ->
+              "DISTINCT ";
+          #{distinct := Distinct} ->
+              ["DISTINCT ON (",
+               string:join(
+                 [ format_expression(E, ParamIndex)
+                   || E <- Distinct], ", "),
+               ") "
+              ];
+          #{} ->
+              []
+      end,
 
-              case Outputs of
-                  [] ->
-                      "1";
-                  _ when is_map(Outputs), map_size(Outputs) =:= 0 ->
-                      "1";
-                  _ when is_list(Outputs) ->
-                      string:join(
-                        [ format_expression(C, ParamIndex)
-                          || C <- Outputs ],
-                        ", ");
-                  _ when is_map(Outputs) ->
-                      string:join(
-                        [ io_lib:format(
-                            "~s AS ~w",
-                            [format_expression(C, ParamIndex), N])
-                          || {N,C} <- maps:to_list(Outputs) ],
-                        ", ")
-              end,
-              " FROM ",
-              io_lib:format("~s AS T~b", [format_table(First, ParamIndex), NF]),
+      case Outputs of
+          [] ->
+              "1";
+          _ when is_map(Outputs), map_size(Outputs) =:= 0 ->
+              "1";
+          _ when is_list(Outputs) ->
+              string:join(
+                [ format_expression(C, ParamIndex)
+                  || C <- Outputs ],
+                ", ");
+          _ when is_map(Outputs) ->
+              string:join(
+                [ io_lib:format(
+                    "~s AS ~w",
+                    [format_expression(C, ParamIndex), N])
+                  || {N,C} <- maps:to_list(Outputs) ],
+                ", ")
+      end,
 
-              [ case T of
-                    {from, F} ->
-                        io_lib:format(
-                          " CROSS JOIN ~s AS T~b",
-                          [format_table(F, ParamIndex), N]);
-                    {join, J, Exprs} ->
-                        [ io_lib:format(
-                            " LEFT OUTER JOIN ~s AS T~b ON ",
-                            [format_table(J, ParamIndex), N]),
-                          case Exprs of
-                              [] ->
-                                  "TRUE";
-                              _ ->
-                                  string:join(
-                                    [ format_expression(E, ParamIndex) || E <- Exprs], " AND ")
-                          end
-                        ]
-                end
-                || {N, T} <- Tables1
-              ],
+      case tuple_to_list(Tables) of
+          [] ->
+              "";
+          [{NF, {from, First}}|Tables1] ->
+              [" FROM ",
+               io_lib:format("~s AS T~b", [format_table(First, ParamIndex), NF]),
 
-              case Wheres of
-                  {} ->
-                      [];
-                  _ ->
-                      [" WHERE ",
-                       string:join(
-                         [ format_expression(E, ParamIndex)
-                           || E <- tuple_to_list(Wheres)
-                         ], " AND ")
-                      ]
-              end,
+               [ case T of
+                     {from, F} ->
+                         io_lib:format(
+                           " CROSS JOIN ~s AS T~b",
+                           [format_table(F, ParamIndex), N]);
+                     {join, J, Exprs} ->
+                         [ io_lib:format(
+                             " LEFT OUTER JOIN ~s AS T~b",
+                             [format_table(J, ParamIndex), N]),
+                           case Exprs of
+                               [] ->
+                                   "";
+                               _ ->
+                                   [" ON ",
+                                    string:join(
+                                      [ format_expression(E, ParamIndex) || E <- Exprs], " AND ")]
+                           end
+                         ]
+                 end
+                 || {N, T} <- Tables1
+               ]
+              ];
+          _ ->
+              throw({error, Line, first_table_join})
+      end,
 
-              case Query of
-                  #{group_by := GroupBy} ->
-                      [" GROUP BY ",
-                       string:join(
-                         [ format_expression(E, ParamIndex)
-                           || E <- GroupBy], ", ")
-                       ];
-                  #{} ->
-                      []
-              end,
+      case [W || W <- tuple_to_list(Wheres), W =/= true] of
+          [] ->
+              [];
+          Wheres1 ->
+              [" WHERE ",
+               string:join(
+                 [ format_expression(E, ParamIndex)
+                   || E <- Wheres1
+                 ], " AND ")
+              ]
+      end,
 
-              case Havings of
-                  {} ->
-                      [];
-                  _ ->
-                      [" HAVING ",
-                       string:join(
-                         [ format_expression(E, ParamIndex)
-                           || E <- tuple_to_list(Havings)], " AND ")
-                      ]
-              end,
+      case Query of
+          #{group_by := GroupBy} ->
+              [" GROUP BY ",
+               string:join(
+                 [ format_expression(E, ParamIndex)
+                   || E <- GroupBy], ", ")
+              ];
+          #{} ->
+              []
+      end,
 
-              case Query of
-                  #{order_by := OrderBy} ->
-                       [" ORDER BY ",
-                        string:join(
-                          [ [ format_expression(element(2,E), ParamIndex),
-                              case element(1, E) of
-                                  asc -> " ASC";
-                                  desc -> " DESC"
-                              end,
-                              case E of
-                                  {_,_} -> [];
-                                  {_,_,first} -> " NULLS FIRST";
-                                  {_,_,last} -> " NULLS LAST"
-                              end
-                            ]
-                            || E <- OrderBy], ", ")
-                       ];
-                  _ ->
-                      []
-              end,
+      case Havings of
+          {} ->
+              [];
+          _ ->
+              [" HAVING ",
+               string:join(
+                 [ format_expression(E, ParamIndex)
+                   || E <- tuple_to_list(Havings)], " AND ")
+              ]
+      end,
 
-              case Query of
-                  #{offset := Offset} ->
-                      io_lib:format(" OFFSET (~s)", [format_expression(Offset, ParamIndex)]);
-                  _ ->
-                      []
-              end,
+      case Query of
+          #{order_by := OrderBy} ->
+              [" ORDER BY ",
+               string:join(
+                 [ [ format_expression(element(2,E), ParamIndex),
+                     case element(1, E) of
+                         asc -> " ASC";
+                         desc -> " DESC"
+                     end,
+                     case E of
+                         {_,_} -> [];
+                         {_,_,first} -> " NULLS FIRST";
+                         {_,_,last} -> " NULLS LAST"
+                     end
+                   ]
+                   || E <- OrderBy], ", ")
+              ];
+          _ ->
+              []
+      end,
 
-              case Query of
-                  #{limit := Limit} ->
-                      io_lib:format(" LIMIT (~s)", [format_expression(Limit, ParamIndex)]);
-                  _ ->
-                      []
-              end
-            ];
-        _ ->
-            throw({error, Line, first_table_join})
-    end.
+      case Query of
+          #{offset := Offset} ->
+              io_lib:format(" OFFSET (~s)", [format_expression(Offset, ParamIndex)]);
+          _ ->
+              []
+      end,
+
+      case Query of
+          #{limit := Limit} ->
+              io_lib:format(" LIMIT (~s)", [format_expression(Limit, ParamIndex)]);
+          _ ->
+              []
+      end
+    ].
 
 format_table(T, _) when is_atom(T) ->
     io_lib:format("\"~s\"", [format_id(T)]);

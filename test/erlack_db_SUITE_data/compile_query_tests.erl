@@ -22,6 +22,21 @@ select_test_() ->
     [ Test(
         fun() ->
                 {{select,
+                  "SELECT 1",
+                  [],
+                  [1,1,1]},
+                 erlack_db:compile(
+                   select(
+                     [ 1
+                       || true
+                     ])),
+                 [{1},{1},{1}]}
+        end,
+        []),
+
+      Test(
+        fun() ->
+                {{select,
                   "SELECT 1 FROM \"items\" AS T1",
                   [],
                   [1,1,1]},
