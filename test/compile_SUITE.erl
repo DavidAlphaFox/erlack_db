@@ -1,4 +1,4 @@
--module(erlack_db_SUITE).
+-module(compile_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -compile(export_all).

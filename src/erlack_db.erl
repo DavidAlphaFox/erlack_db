@@ -1,6 +1,6 @@
 -module(erlack_db).
 
--export([query/2]).
+-export([query/2, escape_id/1]).
 
 -export([parse_transform/2, format_error/1]).
 
@@ -759,9 +759,9 @@ check_expression(_, Used) ->
 
 
 format_query(CTEs, Query, ParamIndex) ->
-    [ [io_lib:format("WITH RECURSIVE \"~s\"(", [format_id(Key)]),
+    [ [io_lib:format("WITH RECURSIVE \"~s\"(", [escape_id(Key)]),
        string:join(
-         [io_lib:format("\"~s\"", [format_id(F)]) || F <- Fields],
+         [io_lib:format("\"~s\"", [escape_id(F)]) || F <- Fields],
          ", "),
        ") AS (",
        string:join([["(", format_query(Q, ParamIndex), ")"] || Q <- Queries], " UNION ALL "),
@@ -909,7 +909,7 @@ format_query(Query = #{line := Line, tables := Tables, outputs := Outputs, where
     ].
 
 format_table(T, _) when is_atom(T) ->
-    io_lib:format("\"~s\"", [format_id(T)]);
+    io_lib:format("\"~s\"", [escape_id(T)]);
 format_table({subquery, CTEs, Query}, ParamIndex) ->
     io_lib:format("LATERAL (~s)", [format_query(CTEs, Query, ParamIndex)]).
 
@@ -923,7 +923,7 @@ format_expression({expr, F, Args}, ParamIndex) ->
         || A <- Args
       ]);
 format_expression({column, T, C}, _) ->
-    io_lib:format("T~b.\"~s\"", [T, format_id(C)]);
+    io_lib:format("T~b.\"~s\"", [T, escape_id(C)]);
 format_expression({integer, I} , _) ->
     io_lib:format("~b", [I]);
 format_expression({var, _} = V, ParamIndex) ->
@@ -932,11 +932,11 @@ format_expression({value, _} = V, ParamIndex) ->
     io_lib:format("$~b", [maps:get(V, ParamIndex)]).
 
 
-format_id(Atom) when is_atom(Atom) ->
-    format_id(atom_to_list(Atom));
-format_id([]) ->
+escape_id(Atom) when is_atom(Atom) ->
+    escape_id(atom_to_list(Atom));
+escape_id([]) ->
     [];
-format_id([$"|T]) ->
-    [$", $"|format_id(T)];
-format_id([H|T]) ->
-    [H|format_id(T)].
+escape_id([$"|T]) ->
+    [$", $"|escape_id(T)];
+escape_id([H|T]) ->
+    [H|escape_id(T)].
